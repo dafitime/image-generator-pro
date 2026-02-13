@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Model files (large, downloaded at runtime)
+*.onnx
+*.pth
+*.pt
+*.h5
+*.keras
+*.tflite
+*.pb
+
+# Config (contains user‑specific paths)
+config.json
+
+# Build artifacts
+build/
+dist/
+*.spec
+*.exe

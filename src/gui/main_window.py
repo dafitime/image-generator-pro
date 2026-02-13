@@ -28,6 +28,7 @@ from src.gui.panels.log_panel import LogPanel
 from src.gui.workers import ScanWorker, ThumbnailLoader
 from src.gui.preview_popup import PreviewPopup
 from src.gui.settings_dialog import SettingsDialog
+from src.gui.splash_screen import SplashScreen 
 from src.logic.history import HistoryManager, UpdateMetadataCommand
 from src.logic.catalog import ImageCatalog   # 🟢 Portable catalog
 
@@ -45,6 +46,16 @@ class ImageOrganizerGUI(QMainWindow):
         self.resize(1400, 900)
 
         self.app = ImageOrganizerApp(self.config)
+        
+        # Splash screen
+        self.splash = SplashScreen()
+        self.splash.show()
+
+        # Connect model loading signals
+        self.app.tagger.load_progress.connect(self.splash.update_progress)
+        self.app.tagger.model_ready.connect(self._on_model_ready)
+        self.app.tagger.model_error.connect(self._on_model_error)
+        
         self.history = HistoryManager()
 
         # Catalog system
@@ -251,6 +262,11 @@ class ImageOrganizerGUI(QMainWindow):
     # Scanning
     # ----------------------------------------------------------------------
     def _start_scan(self):
+        
+        if self.app.tagger.model is None:
+            QMessageBox.information(self, "AI Not Ready", 
+                                    "The AI model is still loading. Please wait.")
+            return
         if not self.catalog:
             reply = QMessageBox.question(
                 self, "No Catalog",
@@ -289,10 +305,22 @@ class ImageOrganizerGUI(QMainWindow):
                     # Prefer plan's filename if set, else from catalog
                     if 'new_filename' not in img or not img['new_filename']:
                         img['new_filename'] = meta['filename']
-                    # Merge tags (plan tags override catalog tags)
+                    # Merge tags (plan tags = AI tags, catalog tags = manual)
                     plan_tags = set(img.get('tags', []))
                     catalog_tags = set(meta['tags'])
                     img['tags'] = list(plan_tags | catalog_tags)
+
+            # 🟢 Save the merged tags back to the catalog
+            for category, images in plan.items():
+                for img in images:
+                    abs_path = Path(img['original_path'])
+                    self.catalog.add_or_update_image(
+                        abs_path,
+                        img['new_filename'],
+                        img['tags']
+                    )
+            self.catalog.save()
+            self.log_panel.log("Catalog updated with AI tags.", "info")
 
         self.current_plan = plan
         self.progress_bar.setValue(0)
@@ -691,3 +719,15 @@ class ImageOrganizerGUI(QMainWindow):
     # ----------------------------------------------------------------------
     def _show_ai_fix(self): pass
     def _show_about(self): pass
+    
+    # ----------------------------------------------------------------------
+    # Model Loader
+    # ----------------------------------------------------------------------
+    
+    def _on_model_ready(self):
+        self.splash.close()
+        self.log_panel.log("AI Tagger (EfficientNet) ready", "success")
+
+    def _on_model_error(self, error):
+        self.splash.close()
+        self.log_panel.log(f"AI Tagger failed to load: {error}", "error")
