@@ -26,3 +26,12 @@ build/
 dist/
 *.spec
 *.exe
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# PyCharm / IDE (if not already present)
+.idea/
+.vscode/

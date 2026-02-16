@@ -1,24 +1,33 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QFrame, QSizePolicy, QGridLayout
+    QScrollArea, QFrame, QSizePolicy, QGridLayout, QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QMouseEvent, QPainter, QColor
 
 class CardWidget(QFrame):
-    clicked = pyqtSignal(str)
+    clicked = pyqtSignal(str, Qt.KeyboardModifier)
     doubleClicked = pyqtSignal(str)
 
-    THUMB_HEIGHT = 180   # fixed
+    THUMB_HEIGHT = 180
+    # Color mapping for labels (semi‑transparent overlay)
+    COLOR_MAP = {
+        "Red":    (255, 0, 0, 60),
+        "Yellow": (255, 255, 0, 60),
+        "Green":  (0, 255, 0, 60),
+        "Blue":   (0, 0, 255, 60),
+        "Purple": (128, 0, 128, 60),
+    }
 
-    def __init__(self, path, filename):
+    def __init__(self, path, filename, color_label=""):
         super().__init__()
         self.path = path
         self.filename = filename
+        self.color_label = color_label
         self.pixmap = None
+        self._selected = False
 
         self.setFrameShape(QFrame.Shape.NoFrame)
-        # fixed size: thumb + 40 width, thumb + 80 height
         self.setFixedSize(self.THUMB_HEIGHT + 40, self.THUMB_HEIGHT + 80)
 
         self.setStyleSheet("""
@@ -44,14 +53,34 @@ class CardWidget(QFrame):
 
     def set_thumbnail(self, pixmap):
         self.pixmap = pixmap
-        if not pixmap.isNull():
-            scaled = pixmap.scaledToHeight(self.THUMB_HEIGHT,
-                                           Qt.TransformationMode.SmoothTransformation)
+        if pixmap.isNull():
+            return
+        scaled = pixmap.scaledToHeight(self.THUMB_HEIGHT,
+                                       Qt.TransformationMode.SmoothTransformation)
+        # Apply color overlay if label exists
+        if self.color_label and self.color_label in self.COLOR_MAP:
+            tinted = self._apply_color_overlay(scaled, self.COLOR_MAP[self.color_label])
+            self.thumb_label.setPixmap(tinted)
+        else:
             self.thumb_label.setPixmap(scaled)
 
-    def mousePressEvent(self, event):
+    def _apply_color_overlay(self, pixmap, color_rgba):
+        """Return a copy of pixmap with a semi‑transparent color overlay."""
+        tinted = pixmap.copy()
+        painter = QPainter(tinted)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.fillRect(tinted.rect(), QColor(*color_rgba))
+        painter.end()
+        return tinted
+
+    def set_color_label(self, color):
+        self.color_label = color
+        if self.pixmap:
+            self.set_thumbnail(self.pixmap)  # refresh
+
+    def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self.path)
+            self.clicked.emit(self.path, event.modifiers())
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -59,7 +88,10 @@ class CardWidget(QFrame):
             self.doubleClicked.emit(self.path)
         super().mouseDoubleClickEvent(event)
 
-    def set_selected(self, selected):
+    def set_selected(self, selected: bool):
+        if self._selected == selected:
+            return
+        self._selected = selected
         self.setProperty("selected", "true" if selected else "false")
         self.style().unpolish(self)
         self.style().polish(self)
@@ -68,13 +100,14 @@ class CardWidget(QFrame):
 class MiddlePanel(QWidget):
     itemClicked = pyqtSignal(str)
     itemDoubleClicked = pyqtSignal(str)
+    selectionChanged = pyqtSignal(list)
 
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)  # no margins – clean
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # Header – only the "GALLERY" label now
+        # Header
         header = QHBoxLayout()
         lbl = QLabel("GALLERY")
         lbl.setObjectName("SubHeader")
@@ -86,7 +119,7 @@ class MiddlePanel(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)  # center horizontally
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         self.grid_container = QWidget()
         self.grid_layout = QGridLayout(self.grid_container)
@@ -96,10 +129,11 @@ class MiddlePanel(QWidget):
         self.scroll.setWidget(self.grid_container)
         layout.addWidget(self.scroll)
 
-        self.cards = {}
-        self.current_selected_path = None
+        self.cards = {}               # path -> CardWidget
+        self.selected_paths = set()
+        self.last_clicked_index = -1
+        self.path_list = []
 
-        # React to container resizes
         self.grid_container.installEventFilter(self)
 
     def eventFilter(self, obj, event):
@@ -108,55 +142,92 @@ class MiddlePanel(QWidget):
         return super().eventFilter(obj, event)
 
     def _reorganize_grid(self):
-        """Calculate column count using fixed card width, no stretching, then center."""
         if not self.cards:
             return
 
         viewport_width = self.scroll.viewport().width()
         spacing = self.grid_layout.horizontalSpacing()
-        card_width = CardWidget.THUMB_HEIGHT + 40   # fixed
+        card_width = CardWidget.THUMB_HEIGHT + 40
 
-        # number of columns that fit without horizontal scrollbar
         cols = max(1, (viewport_width + spacing) // (card_width + spacing))
 
-        # Clear layout
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
 
-        # Add cards in new column order
-        for i, card in enumerate(self.cards.values()):
+        for i, path in enumerate(self.path_list):
+            card = self.cards[path]
             self.grid_layout.addWidget(card, i // cols, i % cols)
 
-        # NO column stretching – columns keep their natural size
-        # Force immediate layout update
         self.grid_layout.activate()
 
-    def add_item(self, path, name):
-        card = CardWidget(path, name)
+    def add_item(self, path, name, color_label=""):
+        if path in self.cards:
+            return
+        card = CardWidget(path, name, color_label)
         card.clicked.connect(self._handle_click)
         card.doubleClicked.connect(self.itemDoubleClicked.emit)
         self.cards[path] = card
+        self.path_list.append(path)
         self._reorganize_grid()
 
-    def _handle_click(self, path):
-        if self.current_selected_path in self.cards:
-            self.cards[self.current_selected_path].set_selected(False)
-        self.cards[path].set_selected(True)
-        self.current_selected_path = path
-        self.itemClicked.emit(path)
+    def _handle_click(self, path, modifiers):
+        new_selection = set()
 
-    def set_thumbnail(self, path, pixmap):
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            new_selection = self.selected_paths.copy()
+            if path in new_selection:
+                new_selection.remove(path)
+            else:
+                new_selection.add(path)
+            self.last_clicked_index = self.path_list.index(path)
+
+        elif modifiers & Qt.KeyboardModifier.ShiftModifier and self.last_clicked_index != -1:
+            current_index = self.path_list.index(path)
+            start = min(self.last_clicked_index, current_index)
+            end = max(self.last_clicked_index, current_index)
+            new_selection = set(self.path_list[start:end+1])
+
+        else:
+            new_selection = {path}
+            self.last_clicked_index = self.path_list.index(path)
+
+        self.set_selection(new_selection)
+
+        if len(new_selection) == 1:
+            self.itemClicked.emit(path)
+
+    def set_selection(self, paths):
+        if not isinstance(paths, set):
+            paths = set(paths)
+
+        for p, card in self.cards.items():
+            card.set_selected(p in paths)
+
+        self.selected_paths = paths
+        self.selectionChanged.emit(list(paths))
+
+    def clear_selection(self):
+        self.set_selection(set())
+
+    def set_thumbnail(self, path, pixmap, color_label=""):
         if path in self.cards:
+            self.cards[path].set_color_label(color_label)
             self.cards[path].set_thumbnail(pixmap)
 
     def clear(self):
         for card in self.cards.values():
             card.deleteLater()
         self.cards.clear()
-        self.current_selected_path = None
+        self.path_list.clear()
+        self.selected_paths.clear()
+        self.last_clicked_index = -1
+        self._reorganize_grid()
 
     def set_on_clicked(self, callback):
         self.itemClicked.connect(callback)
 
     def set_on_double_clicked(self, callback):
         self.itemDoubleClicked.connect(callback)
+
+    def get_selected_paths(self):
+        return list(self.selected_paths)

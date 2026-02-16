@@ -1,30 +1,28 @@
 """
-Top toolbar – Uses qtawesome icons for a cleaner look.
-Matches the professional menu style.
+Top toolbar – Includes search bar on the right of the second row.
 """
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QVBoxLayout, QPushButton, QLabel,
-    QFileDialog, QSizePolicy, QLineEdit
+    QFileDialog, QLineEdit
 )
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 import qtawesome as qta
 
 class Toolbar(QFrame):
+    search_text_changed = pyqtSignal(str)
+
     def __init__(self, config):
         super().__init__()
         self.config = config
-        
-        # We don't need manual borders; qdarktheme handles the container style
-        # just nice padding.
+
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(15, 10, 15, 10) 
+        main_layout.setContentsMargins(15, 10, 15, 10)
         main_layout.setSpacing(10)
 
         # ROW 1: Source & Destination
         row1 = QHBoxLayout()
         row1.setSpacing(15)
 
-        # Helper to create nice icon buttons
         def create_icon_btn(icon_name, tooltip):
             btn = QPushButton()
             btn.setIcon(qta.icon(icon_name, color='#495057'))
@@ -32,7 +30,7 @@ class Toolbar(QFrame):
             btn.setToolTip(tooltip)
             return btn
 
-        # Source Input
+        # Source
         src_label = QLabel("SOURCE:")
         src_label.setStyleSheet("font-weight: bold;")
         row1.addWidget(src_label)
@@ -45,7 +43,7 @@ class Toolbar(QFrame):
         self.btn_src = create_icon_btn('fa5s.folder-open', "Browse Source")
         row1.addWidget(self.btn_src)
 
-        # Destination Input
+        # Destination
         dest_label = QLabel("DESTINATION:")
         dest_label.setStyleSheet("font-weight: bold; margin-left: 10px;")
         row1.addWidget(dest_label)
@@ -60,17 +58,16 @@ class Toolbar(QFrame):
 
         main_layout.addLayout(row1)
 
-        # ROW 2: Primary Actions (Scan / Commit)
+        # ROW 2: Primary Actions + Search Bar
         row2 = QHBoxLayout()
         row2.setSpacing(15)
 
-        # SCAN BUTTON (Big, Blue)
+        # SCAN BUTTON
         self.btn_scanstop = QPushButton(" START SCAN")
         self.btn_scanstop.setIcon(qta.icon('fa5s.play', color='white'))
         self.btn_scanstop.setIconSize(QSize(16, 16))
         self.btn_scanstop.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_scanstop.setFixedSize(140, 40)
-        # We rely on qdarktheme for base, but can override colors for emphasis
         self.btn_scanstop.setStyleSheet("""
             QPushButton {
                 background-color: #0d6efd; 
@@ -83,7 +80,7 @@ class Toolbar(QFrame):
         """)
         row2.addWidget(self.btn_scanstop)
 
-        # COMMIT BUTTON (Green, initially disabled)
+        # COMMIT BUTTON
         self.btn_commit = QPushButton(" COMMIT FILES")
         self.btn_commit.setIcon(qta.icon('fa5s.check', color='white'))
         self.btn_commit.setIconSize(QSize(16, 16))
@@ -103,14 +100,43 @@ class Toolbar(QFrame):
         """)
         row2.addWidget(self.btn_commit)
 
-        row2.addStretch(1) # Push buttons to left
+        # Stretch to push search bar to the right
+        row2.addStretch()
+
+        # 🟢 Search bar with improved placeholder color
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("🔍 Search by tag or filename...")
+        self.search_edit.setFixedWidth(200)
+        self.search_edit.setStyleSheet("""
+            QLineEdit {
+                padding: 6px;
+                border: 1px solid palette(mid);
+                border-radius: 4px;
+                background-color: palette(base);
+                color: palette(text);
+            }
+            QLineEdit::placeholder {
+                color: palette(mid);      /* medium gray – visible on both themes */
+                font-style: italic;
+            }
+        """)
+        self.search_edit.textChanged.connect(self.search_text_changed.emit)
+        row2.addWidget(self.search_edit)
+
         main_layout.addLayout(row2)
 
-    # --- Public API ---
-    def set_source(self, path: str): self.src_path.setText(path)
-    def set_destination(self, path: str): self.dest_path.setText(path)
-    def get_source(self) -> str: return self.src_path.text()
-    def get_destination(self) -> str: return self.dest_path.text()
+    # --- Public API (unchanged) ---
+    def set_source(self, path: str):
+        self.src_path.setText(path)
+
+    def set_destination(self, path: str):
+        self.dest_path.setText(path)
+
+    def get_source(self) -> str:
+        return self.src_path.text()
+
+    def get_destination(self) -> str:
+        return self.dest_path.text()
 
     def set_scan_state(self, is_scanning: bool):
         if is_scanning:
@@ -142,12 +168,15 @@ class Toolbar(QFrame):
 
     def on_browse_source(self, callback):
         self.btn_src.clicked.connect(lambda: self._browse(callback, True))
+
     def on_browse_dest(self, callback):
         self.btn_dest.clicked.connect(lambda: self._browse(callback, False))
+
     def _browse(self, callback, is_source):
         current = self.get_source() if is_source else self.get_destination()
         folder = QFileDialog.getExistingDirectory(self, "Select Folder", current)
-        if folder: callback(folder)
+        if folder:
+            callback(folder)
 
     def on_scan_toggle(self, callback):
         self.btn_scanstop.clicked.connect(callback)

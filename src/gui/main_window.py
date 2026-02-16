@@ -4,9 +4,13 @@ Professional GUI with portable catalog system.
 - Shared .iocat files via cloud sync
 - Persistent tags and custom filenames
 - Instant search by tag or filename
+- Multi‑selection in gallery (Ctrl/Shift)
+- Color label overlays on thumbnails
+- Auto‑load catalog on open
 """
 import sys
 from pathlib import Path
+from collections import defaultdict
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter, QMessageBox,
@@ -30,7 +34,7 @@ from src.gui.preview_popup import PreviewPopup
 from src.gui.settings_dialog import SettingsDialog
 from src.gui.splash_screen import SplashScreen 
 from src.logic.history import HistoryManager, UpdateMetadataCommand
-from src.logic.catalog import ImageCatalog   # 🟢 Portable catalog
+from src.logic.catalog import ImageCatalog
 
 class ImageOrganizerGUI(QMainWindow):
     def __init__(self):
@@ -73,7 +77,7 @@ class ImageOrganizerGUI(QMainWindow):
         self._load_saved_destination()
         self._restore_state()
 
-        # 🟢 Load last catalog on startup
+        # Load last catalog on startup
         if self.config.last_catalog:
             try:
                 p = Path(self.config.last_catalog)
@@ -84,6 +88,11 @@ class ImageOrganizerGUI(QMainWindow):
                         self.image_root = self.catalog.base_dir
                         self._update_window_title()
                         self.log_panel.log(f"Loaded catalog: {self.catalog_path.name}", "info")
+                        # Auto‑load plan from catalog if root exists
+                        if self.image_root and self.image_root.exists():
+                            self.current_plan = self._build_plan_from_catalog()
+                            self.left_panel.populate(self.current_plan)
+                            self.left_panel.select_first()
             except Exception as e:
                 self.log_panel.log(f"Failed to load last catalog: {e}", "error")
 
@@ -105,27 +114,6 @@ class ImageOrganizerGUI(QMainWindow):
 
         self.toolbar = Toolbar(self.config)
         layout.addWidget(self.toolbar)
-
-        # 🟢 Search bar with adaptive placeholder color
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("🔍 Search by tag or filename...")
-        self.search_edit.setFixedWidth(200)
-        self.search_edit.textChanged.connect(self._filter_by_search)
-        self.search_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 6px;
-                border: 1px solid palette(mid);
-                border-radius: 4px;
-                background-color: palette(base);
-                color: palette(text);
-            }
-            QLineEdit::placeholder {
-                color: palette(placeholder-text);
-                font-style: italic;
-            }
-        """)
-        # Append search bar at the end of the toolbar (fixes index out of range)
-        self.toolbar.layout().addWidget(self.search_edit)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setHandleWidth(2)
@@ -169,13 +157,33 @@ class ImageOrganizerGUI(QMainWindow):
         self._create_menubar()
         self.setStyleSheet(self.styleSheet() + STYLESHEET)
 
-        # Log startup messages (no more processor attribute)
+        # Log startup messages
         self.log_panel.log("Application Started", "info")
         self.log_panel.log("AI Tagger (EfficientNet) ready", "success")
 
     # ----------------------------------------------------------------------
     # Catalog Operations
     # ----------------------------------------------------------------------
+    def _build_plan_from_catalog(self):
+        """Create a plan dict from the current catalog, grouping by folder."""
+        if not self.catalog or not self.image_root:
+            return {}
+        plan = defaultdict(list)
+        for rel_path, meta in self.catalog.images.items():
+            abs_path = self.image_root / rel_path
+            folder = rel_path.parent if rel_path.parent != '.' else "Root"
+            file_data = {
+                'original_path': str(abs_path),
+                'filename': abs_path.name,
+                'new_filename': meta.get('filename', abs_path.stem),
+                'tags': meta.get('tags', []),
+                'rating': meta.get('rating', 0),
+                'color_label': meta.get('color_label', ''),
+                'proposed_folder': str(folder)
+            }
+            plan[str(folder)].append(file_data)
+        return dict(plan)
+
     def _new_catalog(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Create New Catalog",
@@ -206,6 +214,17 @@ class ImageOrganizerGUI(QMainWindow):
                 self.image_root = self.catalog.base_dir
                 self._update_window_title()
                 self.log_panel.log(f"Opened catalog: {path}", "success")
+
+                # If image root is set and exists, load the plan from catalog
+                if self.image_root and self.image_root.exists():
+                    self.current_plan = self._build_plan_from_catalog()
+                    self.left_panel.populate(self.current_plan)
+                    self.left_panel.select_first()
+                    count = sum(len(v) for v in self.current_plan.values())
+                    self.status_bar.showMessage(f"Catalog loaded: {count} items")
+                else:
+                    QMessageBox.information(self, "Set Image Root",
+                                            "Please set the image root folder to view images.")
             else:
                 QMessageBox.critical(self, "Error", "Failed to load catalog.")
 
@@ -232,6 +251,11 @@ class ImageOrganizerGUI(QMainWindow):
             self.catalog.save()
             self.log_panel.log(f"Image root set to: {folder}", "success")
             self._update_window_title()
+            # Reload plan from catalog if we have one
+            if self.catalog:
+                self.current_plan = self._build_plan_from_catalog()
+                self.left_panel.populate(self.current_plan)
+                self.left_panel.select_first()
 
     def _update_window_title(self):
         title = "Image Organizer Pro"
@@ -305,19 +329,24 @@ class ImageOrganizerGUI(QMainWindow):
                     # Prefer plan's filename if set, else from catalog
                     if 'new_filename' not in img or not img['new_filename']:
                         img['new_filename'] = meta['filename']
-                    # Merge tags (plan tags = AI tags, catalog tags = manual)
+                    # Merge tags
                     plan_tags = set(img.get('tags', []))
                     catalog_tags = set(meta['tags'])
                     img['tags'] = list(plan_tags | catalog_tags)
+                    # Include rating and color label from catalog
+                    img['rating'] = meta.get('rating', 0)
+                    img['color_label'] = meta.get('color_label', '')
 
-            # 🟢 Save the merged tags back to the catalog
+            # Save merged tags back to catalog
             for category, images in plan.items():
                 for img in images:
                     abs_path = Path(img['original_path'])
                     self.catalog.add_or_update_image(
                         abs_path,
                         img['new_filename'],
-                        img['tags']
+                        img['tags'],
+                        img.get('rating', 0),
+                        img.get('color_label', '')
                     )
             self.catalog.save()
             self.log_panel.log("Catalog updated with AI tags.", "info")
@@ -361,7 +390,7 @@ class ImageOrganizerGUI(QMainWindow):
         for f in files:
             path = f['original_path']
             display = f.get('new_filename', Path(path).stem)
-            self.mid_panel.add_item(path, display)
+            self.mid_panel.add_item(path, display, f.get('color_label', ''))
             items_to_load.append((path, path))
 
         if self.thumbnail_loader and self.thumbnail_loader.isRunning():
@@ -374,9 +403,17 @@ class ImageOrganizerGUI(QMainWindow):
     def _set_thumbnail(self, path, qimage):
         if not qimage.isNull():
             pixmap = QPixmap.fromImage(qimage)
-            self.mid_panel.set_thumbnail(path, pixmap)
+            # Find the color label for this path
+            color_label = ""
+            if self.current_folder_name and self.current_plan:
+                for img in self.current_plan.get(self.current_folder_name, []):
+                    if img['original_path'] == path:
+                        color_label = img.get('color_label', '')
+                        break
+            self.mid_panel.set_thumbnail(path, pixmap, color_label)
 
     def _on_image_select(self, path):
+        """Single image selected (from click without modifiers)."""
         meta = None
         for m in self.current_plan.get(self.current_folder_name, []):
             if m['original_path'] == path:
@@ -385,7 +422,9 @@ class ImageOrganizerGUI(QMainWindow):
         if meta:
             self.right_panel.set_metadata(
                 meta.get('new_filename', ''),
-                meta.get('tags', [])
+                meta.get('tags', []),
+                meta.get('rating', 0),
+                meta.get('color_label', '')
             )
             pixmap = QPixmap(path)
             if not pixmap.isNull():
@@ -405,23 +444,49 @@ class ImageOrganizerGUI(QMainWindow):
             popup.activateWindow()
 
     # ----------------------------------------------------------------------
+    # Multi‑selection handling
+    # ----------------------------------------------------------------------
+    def _on_selection_changed(self, paths):
+        """Called when gallery selection changes (single or multiple)."""
+        if len(paths) == 1:
+            self._on_image_select(paths[0])
+        elif len(paths) > 1:
+            # Multiple items selected – show count and disable editing
+            self.right_panel.clear_preview()
+            self.right_panel.set_metadata(f"{len(paths)} items selected", [], 0, '')
+            self.status_bar.showMessage(f"{len(paths)} items selected")
+        else:
+            # No selection
+            self.right_panel.clear_preview()
+            self.status_bar.showMessage("No selection")
+
+    # ----------------------------------------------------------------------
     # Metadata & Catalog Save
     # ----------------------------------------------------------------------
     def _update_local_meta(self):
-        if not self.current_folder_name or not self.mid_panel.current_selected_path:
+        """Update metadata for the currently selected image (only when exactly one is selected)."""
+        selected = self.mid_panel.get_selected_paths()
+        if len(selected) != 1:
             return
+        current_path = selected[0]
+        if not self.current_folder_name:
+            return
+
         new_data = self.right_panel.get_metadata()
-        current_path = self.mid_panel.current_selected_path
         files = self.current_plan.get(self.current_folder_name, [])
         target_file = next((f for f in files if f['original_path'] == current_path), None)
         if target_file:
             old_snapshot = {
                 'new_filename': target_file['new_filename'],
-                'tags': list(target_file['tags'])
+                'tags': list(target_file['tags']),
+                'rating': target_file.get('rating', 0),
+                'color_label': target_file.get('color_label', '')
             }
             new_snapshot = {
                 'new_filename': new_data['filename'],
-                'tags': list(new_data['tags'])
+                'tags': list(new_data['tags']),
+                'rating': new_data.get('rating', 0),
+                'color_label': new_data.get('color_label', '')
             }
             cmd = UpdateMetadataCommand(
                 files, current_path, old_snapshot, new_snapshot, self._ui_refresh_file
@@ -430,14 +495,22 @@ class ImageOrganizerGUI(QMainWindow):
 
             target_file['new_filename'] = new_data['filename']
             target_file['tags'] = new_data['tags']
+            target_file['rating'] = new_data.get('rating', 0)
+            target_file['color_label'] = new_data.get('color_label', '')
 
-            # 🟢 Save to catalog
+            # Update thumbnail color label
+            if current_path in self.mid_panel.cards:
+                self.mid_panel.cards[current_path].set_color_label(target_file['color_label'])
+
+            # Save to catalog
             if self.catalog and self.image_root:
                 abs_path = Path(target_file['original_path'])
                 self.catalog.add_or_update_image(
                     abs_path,
                     new_data['filename'],
-                    new_data['tags']
+                    new_data['tags'],
+                    new_data.get('rating', 0),
+                    new_data.get('color_label', '')
                 )
                 self.catalog.save()
                 self.log_panel.log(f"Saved to catalog: {target_file['filename']}", "cmd")
@@ -446,11 +519,18 @@ class ImageOrganizerGUI(QMainWindow):
                 self.status_bar.showMessage("✅ Metadata updated (catalog not active).", 3000)
 
     def _ui_refresh_file(self, file_path):
-        if self.mid_panel.current_selected_path == file_path:
+        """Called after undo/redo to refresh UI for the affected file."""
+        selected = self.mid_panel.get_selected_paths()
+        if len(selected) == 1 and selected[0] == file_path:
             files = self.current_plan.get(self.current_folder_name, [])
             meta = next((f for f in files if f['original_path'] == file_path), None)
             if meta:
-                self.right_panel.set_metadata(meta['new_filename'], meta['tags'])
+                self.right_panel.set_metadata(
+                    meta['new_filename'],
+                    meta['tags'],
+                    meta.get('rating', 0),
+                    meta.get('color_label', '')
+                )
         self.log_panel.log(f"Restored state for {Path(file_path).name}", "success")
 
     # ----------------------------------------------------------------------
@@ -577,20 +657,7 @@ class ImageOrganizerGUI(QMainWindow):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("&File")
 
-        # Source / Destination
-        open_src = QAction(qta.icon('fa5s.folder-open'), "Open Source...", self)
-        open_src.setShortcut("Ctrl+Shift+O")
-        open_src.triggered.connect(self._browse_source_from_menu)
-        file_menu.addAction(open_src)
-
-        open_dest = QAction(qta.icon('fa5s.folder'), "Set Destination...", self)
-        open_dest.setShortcut("Ctrl+Shift+D")
-        open_dest.triggered.connect(self._browse_dest_from_menu)
-        file_menu.addAction(open_dest)
-
-        file_menu.addSeparator()
-
-        # 🟢 Catalog actions
+        # Catalog actions first
         new_catalog = QAction(qta.icon('fa5s.file'), "New Catalog...", self)
         new_catalog.setShortcut("Ctrl+N")
         new_catalog.triggered.connect(self._new_catalog)
@@ -605,6 +672,19 @@ class ImageOrganizerGUI(QMainWindow):
         save_catalog.setShortcut("Ctrl+S")
         save_catalog.triggered.connect(self._save_catalog)
         file_menu.addAction(save_catalog)
+
+        file_menu.addSeparator()
+
+        # Source / Destination
+        open_src = QAction(qta.icon('fa5s.folder-open'), "Open Source...", self)
+        open_src.setShortcut("Ctrl+Shift+O")
+        open_src.triggered.connect(self._browse_source_from_menu)
+        file_menu.addAction(open_src)
+
+        open_dest = QAction(qta.icon('fa5s.folder'), "Set Destination...", self)
+        open_dest.setShortcut("Ctrl+Shift+D")
+        open_dest.triggered.connect(self._browse_dest_from_menu)
+        file_menu.addAction(open_dest)
 
         file_menu.addSeparator()
 
@@ -681,16 +761,12 @@ class ImageOrganizerGUI(QMainWindow):
 
     def _show_settings(self):
         dlg = SettingsDialog(self.config, self)
-        # Connect the signal to update tagger when settings are saved
         dlg.settings_changed.connect(self._on_settings_changed)
         dlg.exec()
 
     def _on_settings_changed(self):
-        """Called when settings are saved."""
-        # Update the tagger's threshold
         self.app.update_ai_threshold(self.config.ai_threshold)
         self.log_panel.log(f"AI threshold set to {self.config.ai_threshold}", "info")
-        # Optionally, you could prompt to rescan for new tags
         reply = QMessageBox.question(
             self, "Rescan?",
             "AI threshold changed. Would you like to rescan the current source to apply new tags?",
@@ -698,6 +774,7 @@ class ImageOrganizerGUI(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self._start_scan()
+
     # ----------------------------------------------------------------------
     # Connections
     # ----------------------------------------------------------------------
@@ -711,19 +788,14 @@ class ImageOrganizerGUI(QMainWindow):
         self.left_panel.set_on_item_clicked(self._on_folder_select)
         self.mid_panel.set_on_clicked(self._on_image_select)
         self.mid_panel.set_on_double_clicked(self._on_image_double_click)
-        # Auto‑save on tag changes
+        self.mid_panel.selectionChanged.connect(self._on_selection_changed)
         self.right_panel.tags_updated.connect(self._update_local_meta)
+        self.right_panel.rating_changed.connect(self._update_local_meta)
+        self.right_panel.color_label_changed.connect(self._update_local_meta)
 
-    # ----------------------------------------------------------------------
-    # Placeholders
-    # ----------------------------------------------------------------------
-    def _show_ai_fix(self): pass
-    def _show_about(self): pass
-    
     # ----------------------------------------------------------------------
     # Model Loader
     # ----------------------------------------------------------------------
-    
     def _on_model_ready(self):
         self.splash.close()
         self.log_panel.log("AI Tagger (EfficientNet) ready", "success")
@@ -731,3 +803,9 @@ class ImageOrganizerGUI(QMainWindow):
     def _on_model_error(self, error):
         self.splash.close()
         self.log_panel.log(f"AI Tagger failed to load: {error}", "error")
+
+    # ----------------------------------------------------------------------
+    # Placeholders
+    # ----------------------------------------------------------------------
+    def _show_ai_fix(self): pass
+    def _show_about(self): pass

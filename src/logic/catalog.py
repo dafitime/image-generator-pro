@@ -73,8 +73,8 @@ class ImageCatalog:
         self.base_dir = Path(path)
         self._modified = True
 
-    def add_or_update_image(self, absolute_path: Path, filename: str, tags: List[str]):
-        """Add or update an image in the catalog using its absolute path."""
+    def add_or_update_image(self, absolute_path: Path, filename: str, tags: list, rating: int = 0, color_label: str = ""):
+        """Add or update an image with rating and color label."""
         if not self.base_dir:
             raise ValueError("Base directory not set. Call set_base_dir() first.")
         try:
@@ -86,6 +86,8 @@ class ImageCatalog:
             self.images[rel_path] = {
                 'filename': filename,
                 'tags': tags,
+                'rating': rating,
+                'color_label': color_label,
                 'last_modified': datetime.now().isoformat()
             }
         self._modified = True
@@ -93,7 +95,7 @@ class ImageCatalog:
     def get_image_metadata(self, absolute_path: Path) -> dict:
         """Retrieve metadata for an image using its absolute path."""
         if not self.base_dir:
-            return {'filename': absolute_path.stem, 'tags': []}
+            return {'filename': absolute_path.stem, 'tags': [], 'rating': 0, 'color_label': ''}
         try:
             rel_path = str(absolute_path.relative_to(self.base_dir))
         except ValueError:
@@ -102,7 +104,9 @@ class ImageCatalog:
             entry = self.images.get(rel_path, {})
             return {
                 'filename': entry.get('filename', absolute_path.stem),
-                'tags': entry.get('tags', [])
+                'tags': entry.get('tags', []),
+                'rating': entry.get('rating', 0),
+                'color_label': entry.get('color_label', '')
             }
 
     def search(self, query: str) -> List[str]:
